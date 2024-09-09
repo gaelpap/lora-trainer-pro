@@ -249,6 +249,24 @@ def reset_password():
             flash('Email not found.')
     return render_template('reset_password.html')
 
+@app.route('/run_migrations')
+def run_migrations():
+    try:
+        with app.app_context():
+            migrate.upgrade()
+        return "Migrations run successfully"
+    except Exception as e:
+        return f"Error running migrations: {str(e)}"
+
+@app.route('/add_fal_job_id_column')
+def add_fal_job_id_column():
+    try:
+        with app.app_context():
+            db.engine.execute('ALTER TABLE job ADD COLUMN fal_job_id VARCHAR(36);')
+        return "Column added successfully"
+    except Exception as e:
+        return f"Error adding column: {str(e)}"
+
 @app.route('/admin/update_job/<job_id>', methods=['POST'])
 @login_required
 def admin_update_job(job_id):
