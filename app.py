@@ -10,6 +10,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from flask_migrate import Migrate
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from sqlalchemy import text
 import fal_client
 import logging
 
@@ -253,19 +254,16 @@ def reset_password():
 def run_migrations():
     try:
         with app.app_context():
-            migrate.upgrade()
-        return "Migrations run successfully"
+            # Check if the 'fal_job_id' column exists
+            result = db.engine.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name='job' AND column_name='fal_job_id'"))
+            if result.fetchone() is None:
+                # If the column doesn't exist, add it
+                db.engine.execute(text("ALTER TABLE job ADD COLUMN fal_job_id VARCHAR(36)"))
+                return "Migration successful: Added fal_job_id column to job table"
+            else:
+                return "Migration not needed: fal_job_id column already exists"
     except Exception as e:
-        return f"Error running migrations: {str(e)}"
-
-@app.route('/add_fal_job_id_column')
-def add_fal_job_id_column():
-    try:
-        with app.app_context():
-            db.engine.execute('ALTER TABLE job ADD COLUMN fal_job_id VARCHAR(36);')
-        return "Column added successfully"
-    except Exception as e:
-        return f"Error adding column: {str(e)}"
+        return f"Error running migration: {str(e)}"
 
 @app.route('/admin/update_job/<job_id>', methods=['POST'])
 @login_required
