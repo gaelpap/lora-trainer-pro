@@ -97,16 +97,27 @@ def job_status(job_id):
     pass
 
 # New API routes
-@app.route('/api/register', methods=['POST'])
-def api_register():
-    data = request.get_json()
-    user = User.query.filter_by(email=data['email']).first()
-    if user:
-        return jsonify({"message": "User already exists"}), 400
-    new_user = User(email=data['email'], password=generate_password_hash(data['password']))
-    db.session.add(new_user)
-    db.session.commit()
-    return jsonify({"message": "User created successfully"}), 201
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        try:
+            email = request.form.get('email')
+            password = request.form.get('password')
+            user = User.query.filter_by(email=email).first()
+            if user:
+                flash('Email already registered.')
+                return redirect(url_for('register'))
+            new_user = User(email=email, password=generate_password_hash(password))
+            db.session.add(new_user)
+            db.session.commit()
+            flash('Registration successful. Please log in.')
+            return redirect(url_for('login'))
+        except Exception as e:
+            db.session.rollback()
+            app.logger.error(f"Registration error: {str(e)}")
+            flash('An error occurred during registration. Please try again.')
+            return redirect(url_for('register'))
+    return render_template('register.html')  # This line was likely missing
 
 @app.route('/api/login', methods=['POST'])
 def api_login():
