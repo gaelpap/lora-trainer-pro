@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/0.21.1/axios.min.js"></script>
+</head>
+<body>
+    <h1>Welcome, {{ current_user.email }}</h1>
+    <a href="{{ url_for('logout') }}">Logout</a>
+    
+    <h2>Start New Training</h2>
+    <input type="file" id="file-input" accept="image/*" multiple>
+    <button onclick="uploadFiles()">Add Images</button>
+    <div id="file-list"></div>
+    <button onclick="startTraining()" id="train-button" style="display: none;">Train Model</button>
+    <div id="result"></div>
+
+    <h2>Your Jobs</h2>
+    <ul id="job-list">
+    {% for job in jobs %}
+        <li>
+            Job ID: {{ job.id }} - Status: {{ job.status }}
+            {% if job.model_url %}
+                - <a href="{{ job.model_url }}" target="_blank">Download Model</a>
+            {% endif %}
+        </li>
+    {% endfor %}
+    </ul>
+
+    <script>
+        let uploadedFiles = [];
+
+        async function uploadFiles() {
+            const fileInput = document.getElementById('file-input');
+            const files = fileInput.files;
+
+            for (let i = 0; i < files.length; i++) {
+                const formData = new FormData();
+                formData.append('file', files[i]);
+
+                try {
+                    const response = await axios.post('/upload', formData);
+                    uploadedFiles.push(response.data.filename);
+                    updateFileList();
+                } catch (error) {
+                    console.error('Error:', error);
+                }
+            }
+        }
+
+        function updateFileList() {
+            const fileList = document.getElementById('file-list');
+            fileList.innerHTML = '';
+            uploadedFiles.forEach(file => {
+                const fileItem = document.createElement('div');
+                fileItem.textContent = file;
+                fileList.appendChild(fileItem);
+            });
+
+            document.getElementById('train-button').style.display = uploadedFiles.length > 0 ? 'block' : 'none';
+        }
+
+        async function startTraining() {
+            document.getElementById('result').textContent = 'Starting training...';
+            try {
+                const response = await axios.post('/train');
+                const jobId = response.data.job_id;
+                checkJobStatus(jobId);
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('result').textContent = 'An error occurred while starting the training.';
+            }
+        }
+
+        async function checkJobStatus(jobId) {
+            try {
+                const response = await axios.get(`/job_status/${jobId}`);
+                const data = response.data;
+                if (data.status === 'completed') {
+                    document.getElementById('result').innerHTML = `Training complete! Your model is available at: <a href="${data.model_url}" target="_blank">${data.model_url}</a>`;
+                    location.reload();  // Refresh the page to update the job list
+                } else if (data.status === 'failed') {
+                    document.getElementById('result').textContent = `Training failed`;
+                    location.reload();  // Refresh the page to update the job list
+                } else {
+                    document.getElementById('result').textContent = 'Training in progress...';
+                    setTimeout(() => checkJobStatus(jobId), 5000); // Check again in 5 seconds
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('result').textContent = 'An error occurred while checking job status.';
+            }
+        }
+    </script>
+</body>
+</html>
