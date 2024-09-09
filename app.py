@@ -7,6 +7,7 @@ from flask import Flask, render_template, request, redirect, url_for, flash, jso
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 from flask_migrate import Migrate
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 import fal_client
@@ -28,7 +29,8 @@ jwt = JWTManager(app)
 
 fal_client.api_key = os.environ.get('FAL_KEY')
 
-UPLOAD_FOLDER = tempfile.mkdtemp()
+UPLOAD_FOLDER = os.path.join(tempfile.gettempdir(), 'lora_trainer_uploads')
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 # Set up logging
@@ -50,10 +52,35 @@ class Job(db.Model):
     status = db.Column(db.String(20), nullable=False, default='running')
     model_url = db.Column(db.String(200))
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    fal_job_id = db.Column(db.String(36))
 
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
+
+def check_fal_job_status(job_id):
+    try:
+        handler = fal_client.get_handler(job_id)
+        status = handler.status()
+        return status
+    except Exception as e:
+        app.logger.error(f"Error checking FAL job status: {str(e)}")
+        return None
+
+def update_job_status(job_id):
+    job = Job.query.get(job_id)
+    if job and job.status != 'completed':
+        fal_status = check_fal_job_status(job.fal_job_id)
+        if fal_status == 'completed':
+            result = fal_client.get_handler(job.fal_job_id).result()
+            job.status = 'completed'
+            job.model_url = result['diffusers_lora_file']['url']
+            db.session.commit()
+            app.logger.info(f"Job {job_id} completed and updated in database")
+        elif fal_status == 'failed':
+            job.status = 'failed'
+            db.session.commit()
+            app.logger.info(f"Job {job_id} failed and updated in database")
 
 def run_training_job(job_id, images_url, user_id):
     try:
@@ -68,17 +95,12 @@ def run_training_job(job_id, images_url, user_id):
         )
         app.logger.info(f"Job submitted to FAL. Handler: {handler}")
         
-        result = handler.get()
-        app.logger.info(f"Received result from FAL: {result}")
-        
-        model_url = result['diffusers_lora_file']['url']
-        app.logger.info(f"Model URL: {model_url}")
-        
+        # Store the FAL job ID in our database
         job = Job.query.get(job_id)
-        job.status = 'completed'
-        job.model_url = model_url
+        job.fal_job_id = handler.job_id
         db.session.commit()
-        app.logger.info(f"Job {job_id} completed and updated in database")
+        
+        app.logger.info(f"Job {job_id} started on FAL platform")
     except Exception as e:
         app.logger.error(f"Error in training job {job_id}: {str(e)}", exc_info=True)
         job = Job.query.get(job_id)
@@ -143,26 +165,39 @@ def upload_file():
         return jsonify({'error': 'No selected file'}), 400
     
     if file:
-        filename = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
-        file.save(filename)
-        return jsonify({'message': 'File uploaded successfully', 'filename': file.filename})
+        filename = secure_filename(file.filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{current_user.id}_{filename}")
+        
+        # Check if file already exists
+        if os.path.exists(file_path):
+            return jsonify({'message': 'File already uploaded', 'filename': filename})
+        
+        file.save(file_path)
+        app.logger.info(f"File uploaded: {file_path}")
+        return jsonify({'message': 'File uploaded successfully', 'filename': filename})
+
+@app.route('/list_files', methods=['GET'])
+@login_required
+def list_files():
+    user_files = [f.split('_', 1)[1] for f in os.listdir(app.config['UPLOAD_FOLDER']) if f.startswith(f"{current_user.id}_")]
+    return jsonify({'files': user_files})
 
 @app.route('/train', methods=['POST'])
 @login_required
 def train():
     try:
-        files = os.listdir(app.config['UPLOAD_FOLDER'])
-        if not files:
-            app.logger.warning("No files uploaded for training")
+        user_files = [f for f in os.listdir(app.config['UPLOAD_FOLDER']) if f.startswith(f"{current_user.id}_")]
+        if not user_files:
+            app.logger.warning(f"No files uploaded for training for user {current_user.id}")
             return jsonify({'error': 'No files uploaded'}), 400
 
-        app.logger.info(f"Files for training: {files}")
+        app.logger.info(f"Files for training: {user_files}")
 
-        zip_path = os.path.join(app.config['UPLOAD_FOLDER'], 'images.zip')
+        zip_path = os.path.join(app.config['UPLOAD_FOLDER'], f'{current_user.id}_images.zip')
         with zipfile.ZipFile(zip_path, 'w') as zip_file:
-            for file in files:
+            for file in user_files:
                 file_path = os.path.join(app.config['UPLOAD_FOLDER'], file)
-                zip_file.write(file_path, file)
+                zip_file.write(file_path, file.split('_', 1)[1])
         
         app.logger.info(f"Created zip file at {zip_path}")
 
@@ -181,12 +216,12 @@ def train():
         thread.start()
         app.logger.info(f"Started training thread for job {job_id}")
 
-        for file in files:
+        for file in user_files:
             os.remove(os.path.join(app.config['UPLOAD_FOLDER'], file))
         os.remove(zip_path)
         app.logger.info("Removed temporary files")
 
-        return jsonify({'job_id': job_id, 'status': 'training_started'})
+        return jsonify({'job_id': job_id, 'status': 'training_started', 'file_count': len(user_files)})
     except Exception as e:
         app.logger.error(f"Error in train route: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
@@ -196,6 +231,7 @@ def train():
 def job_status(job_id):
     job = Job.query.get(job_id)
     if job and job.user_id == current_user.id:
+        update_job_status(job_id)
         return jsonify({'status': job.status, 'model_url': job.model_url})
     return jsonify({'status': 'not_found'}), 404
 
@@ -212,6 +248,14 @@ def reset_password():
         else:
             flash('Email not found.')
     return render_template('reset_password.html')
+
+@app.route('/admin/update_job/<job_id>', methods=['POST'])
+@login_required
+def admin_update_job(job_id):
+    if current_user.email != 'your_admin_email@example.com':  # Replace with your admin email
+        return jsonify({'error': 'Unauthorized'}), 403
+    update_job_status(job_id)
+    return jsonify({'message': 'Job status updated'})
 
 # API Routes
 @app.route('/api/register', methods=['POST'])
