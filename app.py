@@ -10,6 +10,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from flask_migrate import Migrate
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 import fal_client
+import logging
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your_secret_key_here')
@@ -30,6 +31,13 @@ fal_client.api_key = os.environ.get('FAL_KEY')
 UPLOAD_FOLDER = tempfile.mkdtemp()
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
+# Set up logging
+if not app.debug:
+    file_handler = logging.FileHandler('app.log')
+    file_handler.setLevel(logging.INFO)
+    app.logger.addHandler(file_handler)
+    app.logger.setLevel(logging.INFO)
+
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(120), unique=True, nullable=False)
@@ -49,24 +57,35 @@ def load_user(user_id):
 
 def run_training_job(job_id, images_url, user_id):
     try:
+        app.logger.info(f"Starting training job {job_id} for user {user_id}")
+        app.logger.info(f"Images URL: {images_url}")
+        
         handler = fal_client.submit(
             "fal-ai/flux-lora-general-training",
             arguments={
                 "images_data_url": images_url
             },
         )
+        app.logger.info(f"Job submitted to FAL. Handler: {handler}")
+        
         result = handler.get()
+        app.logger.info(f"Received result from FAL: {result}")
+        
         model_url = result['diffusers_lora_file']['url']
+        app.logger.info(f"Model URL: {model_url}")
+        
         job = Job.query.get(job_id)
         job.status = 'completed'
         job.model_url = model_url
         db.session.commit()
+        app.logger.info(f"Job {job_id} completed and updated in database")
     except Exception as e:
+        app.logger.error(f"Error in training job {job_id}: {str(e)}", exc_info=True)
         job = Job.query.get(job_id)
         job.status = 'failed'
         db.session.commit()
+        app.logger.info(f"Job {job_id} marked as failed in database")
 
-# Web Routes
 @app.route('/')
 def home():
     return render_template('home.html')
@@ -134,31 +153,42 @@ def train():
     try:
         files = os.listdir(app.config['UPLOAD_FOLDER'])
         if not files:
+            app.logger.warning("No files uploaded for training")
             return jsonify({'error': 'No files uploaded'}), 400
+
+        app.logger.info(f"Files for training: {files}")
 
         zip_path = os.path.join(app.config['UPLOAD_FOLDER'], 'images.zip')
         with zipfile.ZipFile(zip_path, 'w') as zip_file:
             for file in files:
                 file_path = os.path.join(app.config['UPLOAD_FOLDER'], file)
                 zip_file.write(file_path, file)
+        
+        app.logger.info(f"Created zip file at {zip_path}")
 
         with open(zip_path, 'rb') as f:
             url = fal_client.upload(f, "application/zip")
+        
+        app.logger.info(f"Uploaded zip file to FAL. URL: {url}")
 
         job_id = str(uuid.uuid4())
         new_job = Job(id=job_id, user_id=current_user.id)
         db.session.add(new_job)
         db.session.commit()
+        app.logger.info(f"Created new job with ID {job_id} for user {current_user.id}")
         
         thread = threading.Thread(target=run_training_job, args=(job_id, url, current_user.id))
         thread.start()
+        app.logger.info(f"Started training thread for job {job_id}")
 
         for file in files:
             os.remove(os.path.join(app.config['UPLOAD_FOLDER'], file))
         os.remove(zip_path)
+        app.logger.info("Removed temporary files")
 
         return jsonify({'job_id': job_id, 'status': 'training_started'})
     except Exception as e:
+        app.logger.error(f"Error in train route: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/job_status/<job_id>', methods=['GET'])
@@ -169,7 +199,6 @@ def job_status(job_id):
         return jsonify({'status': job.status, 'model_url': job.model_url})
     return jsonify({'status': 'not_found'}), 404
 
-# New route for password reset
 @app.route('/reset_password', methods=['GET', 'POST'])
 def reset_password():
     if request.method == 'POST':
@@ -217,9 +246,8 @@ def api_start_training():
 
 def init_db():
     with app.app_context():
-        # This will create the database tables
         db.create_all()
-        print("Database tables created.")
+        app.logger.info("Database tables created.")
 
 # Initialize the database
 init_db()
