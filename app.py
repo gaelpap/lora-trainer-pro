@@ -48,23 +48,57 @@ def load_user(user_id):
     return User.query.get(int(user_id))
 
 def run_training_job(job_id, images_url, user_id):
-    # Your existing training job logic here
-    pass
+    try:
+        handler = fal_client.submit(
+            "fal-ai/flux-lora-general-training",
+            arguments={
+                "images_data_url": images_url
+            },
+        )
+        result = handler.get()
+        model_url = result['diffusers_lora_file']['url']
+        job = Job.query.get(job_id)
+        job.status = 'completed'
+        job.model_url = model_url
+        db.session.commit()
+    except Exception as e:
+        job = Job.query.get(job_id)
+        job.status = 'failed'
+        db.session.commit()
 
-# Existing web routes
+# Web Routes
 @app.route('/')
 def home():
     return render_template('home.html')
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
-    # Your existing registration logic here
-    pass
+    if request.method == 'POST':
+        email = request.form.get('email')
+        password = request.form.get('password')
+        user = User.query.filter_by(email=email).first()
+        if user:
+            flash('Email already registered.')
+            return redirect(url_for('register'))
+        new_user = User(email=email, password=generate_password_hash(password))
+        db.session.add(new_user)
+        db.session.commit()
+        flash('Registration successful. Please log in.')
+        return redirect(url_for('login'))
+    return render_template('register.html')
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    # Your existing login logic here
-    pass
+    if request.method == 'POST':
+        email = request.form.get('email')
+        password = request.form.get('password')
+        user = User.query.filter_by(email=email).first()
+        if user and check_password_hash(user.password, password):
+            login_user(user)
+            return redirect(url_for('dashboard'))
+        else:
+            flash('Invalid email or password.')
+    return render_template('login.html')
 
 @app.route('/logout')
 @login_required
@@ -81,43 +115,71 @@ def dashboard():
 @app.route('/upload', methods=['POST'])
 @login_required
 def upload_file():
-    # Your existing file upload logic here
-    pass
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+    
+    file = request.files['file']
+    
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    
+    if file:
+        filename = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+        file.save(filename)
+        return jsonify({'message': 'File uploaded successfully', 'filename': file.filename})
 
 @app.route('/train', methods=['POST'])
 @login_required
 def train():
-    # Your existing training logic here
-    pass
+    try:
+        files = os.listdir(app.config['UPLOAD_FOLDER'])
+        if not files:
+            return jsonify({'error': 'No files uploaded'}), 400
+
+        zip_path = os.path.join(app.config['UPLOAD_FOLDER'], 'images.zip')
+        with zipfile.ZipFile(zip_path, 'w') as zip_file:
+            for file in files:
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], file)
+                zip_file.write(file_path, file)
+
+        with open(zip_path, 'rb') as f:
+            url = fal_client.upload(f, "application/zip")
+
+        job_id = str(uuid.uuid4())
+        new_job = Job(id=job_id, user_id=current_user.id)
+        db.session.add(new_job)
+        db.session.commit()
+        
+        thread = threading.Thread(target=run_training_job, args=(job_id, url, current_user.id))
+        thread.start()
+
+        for file in files:
+            os.remove(os.path.join(app.config['UPLOAD_FOLDER'], file))
+        os.remove(zip_path)
+
+        return jsonify({'job_id': job_id, 'status': 'training_started'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/job_status/<job_id>', methods=['GET'])
 @login_required
 def job_status(job_id):
-    # Your existing job status logic here
-    pass
+    job = Job.query.get(job_id)
+    if job and job.user_id == current_user.id:
+        return jsonify({'status': job.status, 'model_url': job.model_url})
+    return jsonify({'status': 'not_found'}), 404
 
-# New API routes
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    if request.method == 'POST':
-        try:
-            email = request.form.get('email')
-            password = request.form.get('password')
-            user = User.query.filter_by(email=email).first()
-            if user:
-                flash('Email already registered.')
-                return redirect(url_for('register'))
-            new_user = User(email=email, password=generate_password_hash(password))
-            db.session.add(new_user)
-            db.session.commit()
-            flash('Registration successful. Please log in.')
-            return redirect(url_for('login'))
-        except Exception as e:
-            db.session.rollback()
-            app.logger.error(f"Registration error: {str(e)}")
-            flash('An error occurred during registration. Please try again.')
-            return redirect(url_for('register'))
-    return render_template('register.html')  # This line was likely missing
+# API Routes
+@app.route('/api/register', methods=['POST'])
+def api_register():
+    data = request.get_json()
+    user = User.query.filter_by(email=data['email']).first()
+    if user:
+        return jsonify({"message": "User already exists"}), 400
+    new_user = User(email=data['email'], password=generate_password_hash(data['password']))
+    db.session.add(new_user)
+    db.session.commit()
+    return jsonify({"message": "User created successfully"}), 201
 
 @app.route('/api/login', methods=['POST'])
 def api_login():
@@ -137,15 +199,6 @@ def api_start_training():
         return jsonify({"message": "Payment required"}), 403
     # Your training logic here
     return jsonify({"message": "Training started"}), 200
-
-@app.route('/api/job_status/<job_id>', methods=['GET'])
-@jwt_required()
-def api_job_status(job_id):
-    user_id = get_jwt_identity()
-    job = Job.query.get(job_id)
-    if job and job.user_id == user_id:
-        return jsonify({'status': job.status, 'model_url': job.model_url})
-    return jsonify({'status': 'not_found'}), 404
 
 if __name__ == '__main__':
     with app.app_context():
