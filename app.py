@@ -200,7 +200,14 @@ def api_start_training():
     # Your training logic here
     return jsonify({"message": "Training started"}), 200
 
-if __name__ == '__main__':
+def init_db():
     with app.app_context():
+        # This will create the database tables
         db.create_all()
+        print("Database tables created.")
+
+# Initialize the database
+init_db()
+
+if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
