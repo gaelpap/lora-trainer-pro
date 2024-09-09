@@ -169,6 +169,21 @@ def job_status(job_id):
         return jsonify({'status': job.status, 'model_url': job.model_url})
     return jsonify({'status': 'not_found'}), 404
 
+# New route for password reset
+@app.route('/reset_password', methods=['GET', 'POST'])
+def reset_password():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        user = User.query.filter_by(email=email).first()
+        if user:
+            # Here you would typically send an email with reset instructions
+            # For now, we'll just flash a message
+            flash('Password reset instructions sent to your email.')
+            return redirect(url_for('login'))
+        else:
+            flash('Email not found.')
+    return render_template('reset_password.html')
+
 # API Routes
 @app.route('/api/register', methods=['POST'])
 def api_register():
